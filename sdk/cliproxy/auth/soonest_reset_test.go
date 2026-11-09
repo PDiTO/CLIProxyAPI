@@ -89,6 +89,14 @@ func TestRoutingQuotaParserContracts(t *testing.T) {
 		{"codex", "codex", fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":24,"limit_window_seconds":18000,"reset_at":%d},"secondary_window":{"used_percent":80,"limit_window_seconds":604800,"reset_at":%d}},"code_review_rate_limit":{"primary_window":{"used_percent":100}}}`, now.Add(time.Hour).Unix(), now.Add(24*time.Hour).Unix()), true, 2},
 		{"free-weekly-primary", "codex", `{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":3600},"secondary_window":null}}`, true, 1},
 		{"claude", "claude", `{"five_hour":{"utilization":0,"resets_at":"2026-11-01T01:00:00Z"},"seven_day":{"utilization":84,"resets_at":"2026-11-03T00:00:00Z"},"seven_day_opus":{"utilization":100,"resets_at":"2026-11-02T00:00:00Z"},"extra_usage":{"utilization":100}}`, true, 3},
+		{"claude-idle-short-and-model-windows", "claude", `{"five_hour":{"utilization":0,"resets_at":null},"seven_day":{"utilization":40,"resets_at":"2026-11-03T00:00:00Z"},"seven_day_opus":{"utilization":null,"resets_at":null},"seven_day_sonnet":{"utilization":0,"resets_at":null}}`, true, 1},
+		{"claude-all-idle", "claude", `{"five_hour":{"utilization":0,"resets_at":null},"seven_day":{"utilization":null,"resets_at":null}}`, true, 0},
+		{"claude-active-without-reset", "claude", `{"five_hour":{"utilization":10,"resets_at":null},"seven_day":{"utilization":40,"resets_at":"2026-11-03T00:00:00Z"}}`, false, 1},
+		{"claude-missing-reset", "claude", `{"five_hour":{"utilization":0}}`, false, 0},
+		{"claude-missing-utilization", "claude", `{"five_hour":{"resets_at":null}}`, false, 0},
+		{"claude-empty-response", "claude", `{}`, false, 0},
+		{"codex-null-named-pool", "codex", `{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":3600}},"additional_rate_limits":[{"limit_name":"gpt-5.3-codex-spark","rate_limit":null}]}`, true, 1},
+		{"codex-null-main-pool", "codex", `{"rate_limit":null}`, false, 0},
 		{"numeric-string", "codex", `{"rate_limit":{"primary_window":{"used_percent":"0","limit_window_seconds":604800,"reset_after_seconds":3600}}}`, false, 0},
 		{"unknown-shape", "codex", `{"credits":{"balance":100}}`, false, 0},
 		{"malformed", "claude", `{"seven_day":{"utilization":12,"resets_at":"invalid"}}`, false, 0},
@@ -100,6 +108,42 @@ func TestRoutingQuotaParserContracts(t *testing.T) {
 				t.Fatalf("windows=%+v valid=%v", w, valid)
 			}
 		})
+	}
+}
+
+func TestRoutingQuotaCodexExhaustionDeadlines(t *testing.T) {
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	for _, flag := range []string{`"limit_reached":true`, `"allowed":false`} {
+		for _, tc := range []struct {
+			name        string
+			short, week float64
+			want        time.Duration
+		}{
+			{"short-only", 100, 40, time.Hour},
+			{"week-only", 10, 100, 24 * time.Hour},
+			{"both", 100, 100, 24 * time.Hour},
+			{"denied-without-full-counter", 99, 40, 24 * time.Hour},
+		} {
+			t.Run(flag+"/"+tc.name, func(t *testing.T) {
+				body := fmt.Sprintf(`{"rate_limit":{%s,"primary_window":{"used_percent":%g,"limit_window_seconds":18000,"reset_at":%d},"secondary_window":{"used_percent":%g,"limit_window_seconds":604800,"reset_at":%d}},"additional_rate_limits":[{"limit_name":"gpt-5.3-codex-spark","rate_limit":{"allowed":false,"primary_window":{"used_percent":25,"limit_window_seconds":604800,"reset_at":%d}}}]}`, flag, tc.short, now.Add(time.Hour).Unix(), tc.week, now.Add(24*time.Hour).Unix(), now.Add(12*time.Hour).Unix())
+				windows, valid := parseRoutingQuota("codex", []byte(body), now)
+				if !valid || len(windows) != 3 {
+					t.Fatalf("windows=%+v valid=%v", windows, valid)
+				}
+				if windows[0].UsedPercent != tc.short || windows[1].UsedPercent != tc.week {
+					t.Fatal("group denial changed usage counters")
+				}
+				s := &SoonestResetSelector{}
+				a := routingTestAuth("deadline")
+				setRoutingTestQuota(s, a, now, windows...)
+				if until := s.blockedUntil(a, "gpt-5.4", now); !until.Equal(now.Add(tc.want)) {
+					t.Fatalf("blocked until %v want %v", until, now.Add(tc.want))
+				}
+				if until := s.blockedUntil(a, "gpt-5.3-codex-spark", now); !until.Equal(now.Add(12 * time.Hour)) {
+					t.Fatalf("named pool denial was affected by default pool counters: %v", until)
+				}
+			})
+		}
 	}
 }
 
@@ -296,6 +340,31 @@ func TestRoutingQuotaRefreshDiscoversAccountsAndRetainsLastObservation(t *testin
 	_ = m.RoutingStatus(ctx, "codex", "", now)
 	if calls.Load() != before || exec.refreshes.Load() != 0 {
 		t.Fatal("status read polled quota or refreshed credentials")
+	}
+}
+
+func TestRoutingQuotaRefreshAllIdleClearsExhaustedSnapshot(t *testing.T) {
+	ctx := context.Background()
+	s := &SoonestResetSelector{}
+	m := NewManager(nil, s, nil)
+	m.RegisterExecutor(&routingTestExecutor{provider: "claude", http: func(_ context.Context, _ *Auth, _ *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"five_hour":{"utilization":0,"resets_at":null},"seven_day":{"utilization":null,"resets_at":null},"seven_day_opus":null,"seven_day_sonnet":{"utilization":0,"resets_at":null}}`))}, nil
+	}})
+	a := routingTestAuth(t.Name())
+	a.Provider = "claude"
+	a, err := m.Register(ctx, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	setRoutingTestQuota(s, a, now.Add(-time.Minute), routingTestWindow("seven_day", now, 24*time.Hour, 100, 604800))
+	if s.blockedUntil(a, "claude-sonnet-4-6", now).IsZero() {
+		t.Fatal("fixture did not block exhausted account")
+	}
+	m.refreshRoutingQuotas(ctx, now).Wait()
+	r, window, state, until := s.view(a, "claude-sonnet-4-6", time.Now())
+	if r.errorCode != "" || r.observedAt.Before(now) || len(r.windows) != 0 || window != nil || state != "missing" || !until.IsZero() {
+		t.Fatalf("all-idle refresh retained exhausted data: record=%+v window=%+v state=%s until=%v", r, window, state, until)
 	}
 }
 

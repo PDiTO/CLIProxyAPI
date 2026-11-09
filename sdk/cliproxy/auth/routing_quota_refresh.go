@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // StartRoutingQuotaRefresh starts one service-owned worker. Probes never refresh tokens,
@@ -152,7 +154,11 @@ func (m *Manager) fetchRoutingQuota(ctx context.Context, a *Auth) ([]RoutingWind
 	if resp == nil || resp.Body == nil {
 		return nil, "request_failed"
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.WithField("error_code", "response_close_failed").Warn("routing quota response body close failed")
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		switch resp.StatusCode {
 		case 401, 403:

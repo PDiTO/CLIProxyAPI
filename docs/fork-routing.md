@@ -19,11 +19,15 @@ Codex this means the main `rate_limit.primary_window` and `secondary_window`,
 using `limit_window_seconds` rather than assuming primary always means five hours.
 A weekly window drives ordering when present. An exhausted applicable short or
 weekly window blocks use until reset. Codex `allowed: false` or `limit_reached:
-true` conservatively exhausts that rate-limit group's returned windows.
+true` uses the individually exhausted windows for the recovery deadline. When
+none of the counters identifies the exhausted window, it conservatively blocks
+the group's returned windows until their latest reset.
 Additional pools apply only when their normalized `limit_name` exactly matches
 the requested upstream model; a matched named pool replaces the default pool. Code-review limits and credits never rank ordinary
 inference. Claude uses `five_hour`, `seven_day`, and applicable `seven_day_opus`
-or `seven_day_sonnet` windows. Other Claude usage groups are not interpreted.
+or `seven_day_sonnet` windows. A Claude window with null reset and zero or null
+utilization has not started and is omitted. A null optional Codex named pool is
+also omitted. Other Claude usage groups are not interpreted.
 
 Only finite, nonnegative numeric utilization, valid reset timestamps and bounded
 window lengths are accepted. Missing, malformed, future-dated observations,
@@ -31,6 +35,8 @@ observations older than 15 minutes, elapsed resets and unsupported providers fal
 back to deterministic fill-first. An elapsed reset does not establish renewed
 quota. A failed refresh retains the previous successful observation until stale.
 A malformed partial response cannot replace the last complete observation.
+A valid all-idle Claude response clears the previous snapshot and falls back to
+fill-first without inventing a reset or retaining an exhausted window.
 Unsupported provider credentials and API keys remain eligible through the same
 fallback. SIWC inference uses a different credential partition, so ChatGPT usage
 is not applied to non-Codex SIWC traffic.

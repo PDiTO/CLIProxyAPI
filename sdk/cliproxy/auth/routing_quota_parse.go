@@ -24,6 +24,7 @@ func parseRoutingQuota(provider string, data []byte, now time.Time) ([]RoutingWi
 	root := ojson.ParseBytes(data)
 	windows := make([]RoutingWindow, 0, 6)
 	malformed := false
+	idle := false
 	if provider == "codex" {
 		add := func(rate ojson.Result, prefix, model string) {
 			if !rate.IsObject() {
@@ -31,6 +32,8 @@ func parseRoutingQuota(provider string, data []byte, now time.Time) ([]RoutingWi
 				return
 			}
 			denied := (rate.Get("allowed").Type == ojson.False) || (rate.Get("limit_reached").Type == ojson.True)
+			start := len(windows)
+			anyFull := false
 			for _, key := range []string{"primary_window", "secondary_window"} {
 				w := rate.Get(key)
 				if !w.Exists() || w.Type == ojson.Null {
@@ -49,7 +52,13 @@ func parseRoutingQuota(provider string, data []byte, now time.Time) ([]RoutingWi
 					malformed = true
 					continue
 				}
-				windows = append(windows, RoutingWindow{Key: prefix + key, ResetsAt: resetAt, UsedPercent: used, seconds: int64(seconds), model: model, denied: denied})
+				anyFull = anyFull || used >= 100
+				windows = append(windows, RoutingWindow{Key: prefix + key, ResetsAt: resetAt, UsedPercent: used, seconds: int64(seconds), model: model})
+			}
+			// A group-level denial does not identify which limit was exhausted.
+			// Use full counters when available; otherwise conservatively block the group.
+			for i := start; i < len(windows); i++ {
+				windows[i].denied = denied && !anyFull
 			}
 		}
 		add(root.Get("rate_limit"), "", "")
@@ -61,8 +70,9 @@ func parseRoutingQuota(provider string, data []byte, now time.Time) ([]RoutingWi
 					return true
 				}
 				model := normalizeQuotaModel(name.String())
-				if model != "" {
-					add(v.Get("rate_limit"), "additional:"+model+":", model)
+				rate := v.Get("rate_limit")
+				if model != "" && rate.Exists() && rate.Type != ojson.Null {
+					add(rate, "additional:"+model+":", model)
 				}
 				return len(windows) < 32
 			})
@@ -76,8 +86,14 @@ func parseRoutingQuota(provider string, data []byte, now time.Time) ([]RoutingWi
 			if !w.Exists() || w.Type == ojson.Null {
 				continue
 			}
-			used, ok := quotaNumber(w.Get("utilization"))
+			util := w.Get("utilization")
+			used, ok := quotaNumber(util)
 			reset := w.Get("resets_at")
+			// Claude has no reset for a window that has not started this period.
+			if reset.Exists() && reset.Type == ojson.Null && util.Exists() && (util.Type == ojson.Null || (ok && used == 0)) {
+				idle = true
+				continue
+			}
 			resetAt, err := time.Parse(time.RFC3339Nano, reset.String())
 			if !ok || reset.Type != ojson.String || err != nil || resetAt.After(now.Add(32*24*time.Hour)) {
 				malformed = true
@@ -87,5 +103,6 @@ func parseRoutingQuota(provider string, data []byte, now time.Time) ([]RoutingWi
 		}
 	}
 	// A partly malformed snapshot cannot establish that all applicable limits are usable.
-	return windows, len(windows) > 0 && !malformed
+	// A valid all-idle response clears an earlier snapshot without inventing a reset.
+	return windows, (len(windows) > 0 || idle) && !malformed
 }

@@ -440,6 +440,7 @@ func (m *Manager) SetSelector(selector Selector) {
 		return
 	}
 	m.selector = selector
+	m.routingQuota.Store(soonestSelector(selector))
 	m.mu.Unlock()
 
 	if oldSelector != nil {
@@ -578,6 +579,11 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, clientHeaders...)
+		if quota := m.routingQuota.Load(); quota != nil && !blocked && !IsCodexUseSIWCForRequest(ctx, candidate, clientHeaders...) {
+			if until := quota.blockedUntil(candidate, checkModel, now); !until.IsZero() {
+				blocked, reason, next = true, blockReasonCooldown, until
+			}
+		}
 		if !blocked {
 			priority := authPriority(candidate)
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
@@ -675,7 +681,7 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 
 func selectorContextForAvailableAuths(ctx context.Context, selector Selector, routeModel string) context.Context {
 	ctx = withWeightedSelectorStateModel(ctx, selector, routeModel)
-	if !isBuiltInSelector(selector) {
+	if !isBuiltInSelector(selector) && soonestSelector(selector) == nil {
 		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
 			return ctx
 		}
@@ -700,6 +706,9 @@ func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(ctx context.Conte
 			continue
 		}
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
+		if quota := soonestSelector(selector); quota != nil && !IsCodexUseSIWCForRequest(ctx, candidate, clientHeaders...) && !quota.blockedUntil(candidate, checkModel, now).IsZero() {
+			continue
+		}
 		if !isAuthBlockedByQuotaOrAuthForModelForRequest(ctx, candidate, checkModel, now, clientHeaders...) {
 			if authIDs == nil {
 				authIDs = make(map[string]struct{}, len(affinityCandidates))
@@ -2022,6 +2031,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
+		selectorCtx = m.routingQuotaContext(selectorCtx, selector, selectorAuths, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
@@ -2452,6 +2462,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
+		selectorCtx = m.routingQuotaContext(selectorCtx, selector, selectorAuths, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {

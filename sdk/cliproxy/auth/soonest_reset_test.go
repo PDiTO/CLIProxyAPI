@@ -111,6 +111,27 @@ func TestRoutingQuotaParserContracts(t *testing.T) {
 	}
 }
 
+func TestRoutingStatusPluginSchedulerState(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		scheduler PluginScheduler
+		want      string
+	}{
+		{"absent", nil, "no_eligible_accounts"},
+		{"inactive-host", &inactivePluginScheduler{}, "no_eligible_accounts"},
+		{"active", &fakePluginScheduler{}, "plugin_scheduler"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, &SoonestResetSelector{}, nil)
+			m.SetPluginScheduler(tc.scheduler)
+			status := m.RoutingStatus(context.Background(), "codex", "", time.Now())
+			if status.FallbackReason != tc.want || status.NextAuthIndex != "" {
+				t.Fatalf("status=%+v", status)
+			}
+		})
+	}
+}
+
 func TestRoutingQuotaCodexExhaustionDeadlines(t *testing.T) {
 	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	for _, flag := range []string{`"limit_reached":true`, `"allowed":false`} {

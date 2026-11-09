@@ -76,7 +76,7 @@ func (m *Manager) RoutingStatus(ctx context.Context, provider, model string, now
 	}
 	if m.HomeEnabled() {
 		status.FallbackReason = "home_authoritative"
-	} else if plugin, _ := m.snapshotPluginScheduler(); plugin != nil {
+	} else if m.hasPluginScheduler() {
 		status.FallbackReason = "plugin_scheduler"
 	}
 	auths := m.List()

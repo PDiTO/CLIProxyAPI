@@ -9,6 +9,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -22,8 +23,16 @@ func (s *Server) drainExempt(r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
-	return path == "/" || path == "/healthz" || path == "/management.html" ||
-		strings.HasPrefix(path, "/v8/management/") || strings.HasPrefix(path, "/v0/management/")
+	// Only explicitly read-only endpoints bypass maintenance. In particular,
+	// OAuth GETs can start exchanges and credential writes after returning.
+	switch path {
+	case "/", "/healthz", "/management.html",
+		"/v8/management/config", "/v8/management/config.yaml", "/v8/management/routing/status",
+		"/v8/management/server/latest-version", "/v0/management/config", "/v0/management/config.yaml",
+		"/v0/management/latest-version":
+		return true
+	}
+	return strings.HasPrefix(path, "/v8/management/config/")
 }
 
 func (s *Server) drainBlockers() []string {
@@ -49,6 +58,9 @@ func (s *Server) drainBlockers() []string {
 	}
 	if s.codexLiveHandler != nil && s.codexLiveHandler.ActiveSessions() > 0 {
 		blockers = append(blockers, "realtime_sessions")
+	}
+	if managementHandlers.HasPendingOAuthSessions() {
+		blockers = append(blockers, "oauth_sessions")
 	}
 	return blockers
 }
@@ -127,7 +139,7 @@ func (s *Server) stopDrained(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if len(s.drainBlockers()) > 0 || !s.drain.CommitStop(instance, owner) {
+	if !s.drain.CommitStop(instance, owner, func() bool { return len(s.drainBlockers()) == 0 }) {
 		s.writeDrainStatus(c, http.StatusConflict)
 		return
 	}

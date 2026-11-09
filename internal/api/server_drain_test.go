@@ -14,6 +14,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -297,8 +298,16 @@ func TestDrainUnknownBackgroundWebsocketWaitsForSocketClose(t *testing.T) {
 	}
 	once.Do(func() { close(release) })
 	<-closed
-	if !s.drain.Status().Ready {
-		t.Fatal(s.drain.Status())
+	// Close can finish before the outer logging/middleware chain returns.
+	// Wait for both completion conditions, as the production updater does.
+	deadline := time.After(5 * time.Second)
+	for !s.drain.Status().Ready {
+		select {
+		case <-deadline:
+			t.Fatal("background handler cleanup did not finish", s.drain.Status())
+		default:
+		}
+		drainCall(t, ts, "GET", drainPath, "", "")
 	}
 }
 
@@ -311,5 +320,56 @@ func TestDrainConfiguredPluginBlocksMaintenance(t *testing.T) {
 	code, data := drainCall(t, ts, "POST", drainPath, s.drain.Status().InstanceID, testDrainOwner)
 	if code != 409 || ojson.GetBytesNoCopy(data, "supported").Bool() || s.drain.Status().Draining {
 		t.Fatal(code, string(data))
+	}
+}
+
+func TestDrainFencesMutatingOAuthGETRequests(t *testing.T) {
+	s := newDrainServer(t)
+	ts := drainHTTP(t, s)
+	if code, _ := drainCall(t, ts, "POST", drainPath, s.drain.Status().InstanceID, testDrainOwner); code != 200 {
+		t.Fatal(code)
+	}
+	for _, path := range []string{
+		"/v8/management/oauth/auth-url?provider=codex",
+		"/v8/management/oauth/callback?state=test&code=test",
+		"/v0/management/codex-auth-url",
+		"/v0/management/oauth-callback?state=test&code=test",
+	} {
+		if code, _ := drainCall(t, ts, "GET", path, "", ""); code != 503 {
+			t.Fatal("OAuth GET bypassed fence", path, code)
+		}
+	}
+	// Configuration and the drain snapshot remain readable during maintenance.
+	if code, _ := drainCall(t, ts, "GET", drainPath, "", ""); code != 200 {
+		t.Fatal(code)
+	}
+}
+
+func TestPendingOAuthSessionBlocksDrainAfterItsRequestReturns(t *testing.T) {
+	s := newDrainServer(t)
+	ts := drainHTTP(t, s)
+	state := "maintenance-test-pending-oauth"
+	managementHandlers.RegisterOAuthSession(state, "codex")
+	t.Cleanup(func() { managementHandlers.CancelOAuthSession(state) })
+	instance := s.drain.Status().InstanceID
+	code, data := drainCall(t, ts, "POST", drainPath, instance, testDrainOwner)
+	if code != 409 || ojson.GetBytesNoCopy(data, "supported").Bool() {
+		t.Fatal(code, string(data))
+	}
+	// Check the atomic commit path too: a previously ready drain must recheck
+	// outstanding detached work even if a caller ignores the status snapshot.
+	_, ok := s.drain.Begin(instance, testDrainOwner)
+	if !ok {
+		t.Fatal("cannot set test lease")
+	}
+	if code, _ := drainCall(t, ts, "POST", drainPath+"/stop", instance, testDrainOwner); code != 409 {
+		t.Fatal("stopped pending OAuth", code)
+	}
+	managementHandlers.CancelOAuthSession(state)
+	if !s.drain.Cancel(instance, testDrainOwner) {
+		t.Fatal("cannot cancel test lease")
+	}
+	if code, _ := drainCall(t, ts, "POST", drainPath, instance, testDrainOwner); code != 200 {
+		t.Fatal(code)
 	}
 }

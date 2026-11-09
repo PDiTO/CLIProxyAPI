@@ -42,14 +42,14 @@ func TestLeaseOwnershipExpirationAndAtomicStop(t *testing.T) {
 		t.Fatal("cancelled another owner")
 	}
 	now = now.Add(time.Minute)
-	if d.CommitStop(first.InstanceID, owner) {
+	if d.CommitStop(first.InstanceID, owner, nil) {
 		t.Fatal("committed expired lease")
 	}
 	if d.Status().Draining {
 		t.Fatal("lease did not expire")
 	}
 	begin(t, d)
-	if !d.CommitStop(first.InstanceID, owner) {
+	if !d.CommitStop(first.InstanceID, owner, nil) {
 		t.Fatal("could not commit safe stop")
 	}
 	now = now.Add(10 * time.Minute)
@@ -118,7 +118,7 @@ func TestManagedSessionPendingToolsAndCleanupBlockStop(t *testing.T) {
 	if session.BeginTurn() {
 		t.Fatal("started new turn during drain")
 	}
-	if d.CommitStop(d.Status().InstanceID, owner) {
+	if d.CommitStop(d.Status().InstanceID, owner, nil) {
 		t.Fatal("ready before upstream cleanup")
 	}
 	session.Close()
@@ -196,5 +196,90 @@ func TestMissingConnectionMetadataCannotClaimFlushComplete(t *testing.T) {
 	ticket.finish()
 	if status := begin(t, d); status.Ready {
 		t.Fatal("missing ConnContext/ConnState must fail closed")
+	}
+}
+
+func TestStopEvaluatesDetachedWorkAfterAdmittedRequestCompletes(t *testing.T) {
+	d := New()
+	conn, other := net.Pipe()
+	defer conn.Close()
+	defer other.Close()
+	req := httptest.NewRequest("POST", "/v1/realtime/calls", nil)
+	req = req.WithContext(d.ConnContext(context.Background(), conn))
+	ticket, _ := d.admit(req)
+	instance := begin(t, d).InstanceID
+	called, detached := false, false
+	canStop := func() bool { called = true; return !detached }
+	if d.CommitStop(instance, owner, canStop) || called {
+		t.Fatal("blockers read before admitted request was complete")
+	}
+	// The bootstrap publishes its detached session before returning/flushing.
+	detached = true
+	ticket.finish()
+	d.ConnState(conn, http.StateIdle)
+	if d.CommitStop(instance, owner, canStop) || !called {
+		t.Fatal("missed detached session handoff")
+	}
+	detached = false
+	if !d.CommitStop(instance, owner, canStop) {
+		t.Fatal("blocked after detached work ended")
+	}
+}
+
+func TestCompletedHTTP2AccountingIsBoundedByConnectionCount(t *testing.T) {
+	d := New()
+	conn, other := net.Pipe()
+	defer conn.Close()
+	defer other.Close()
+	req := httptest.NewRequest("POST", "/work", nil)
+	req.ProtoMajor = 2
+	req = req.WithContext(d.ConnContext(context.Background(), conn))
+	for range 10000 {
+		ticket, _ := d.admit(req)
+		ticket.finish()
+		d.ConnState(conn, http.StateIdle)
+	}
+	if len(d.requests) != 0 || len(d.connections) != 1 {
+		t.Fatal("retained historical request tickets", len(d.requests), len(d.connections))
+	}
+	if status := begin(t, d); status.Ready || status.ActiveRequests != 1 {
+		t.Fatal(status)
+	}
+	d.ConnState(conn, http.StateClosed)
+	if status := d.Status(); !status.Ready || len(d.connections) != 0 {
+		t.Fatal(status)
+	}
+}
+
+func TestUnknownConnectionCompletionBarrierIsBounded(t *testing.T) {
+	d := New()
+	for range 10000 {
+		ticket, _ := d.admit(httptest.NewRequest("POST", "/work", nil))
+		ticket.finish()
+	}
+	if len(d.requests) != 0 || !d.untrackedCompletion {
+		t.Fatal("retained historical untracked tickets")
+	}
+	if status := begin(t, d); status.Ready || status.ActiveRequests != 1 {
+		t.Fatal(status)
+	}
+}
+
+func TestHijackedSocketCloseRemovesItsConnectionState(t *testing.T) {
+	d := New()
+	conn, other := net.Pipe()
+	defer other.Close()
+	req := httptest.NewRequest("GET", "/background-ws", nil)
+	req = req.WithContext(d.ConnContext(context.Background(), conn))
+	ticket, _ := d.admit(req)
+	ticket.hijacked = true
+	ticket.finish()
+	socket := &hijackedConn{Conn: conn, ticket: ticket}
+	begin(t, d)
+	if err := socket.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.connections) != 0 || len(d.requests) != 0 || !d.Status().Ready {
+		t.Fatal("retained closed socket state", d.Status())
 	}
 }

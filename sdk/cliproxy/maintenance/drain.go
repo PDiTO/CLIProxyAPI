@@ -24,15 +24,24 @@ const (
 // Controller fences admission and tracks requests through net/http's final flush.
 // It deliberately does not change the server's ordinary immediate Stop behavior.
 type Controller struct {
-	mu       sync.Mutex
-	now      func() time.Time
-	instance string
-	owner    string
-	expires  time.Time
-	stopping bool
-	signal   chan struct{}
+	mu                  sync.Mutex
+	now                 func() time.Time
+	instance            string
+	owner               string
+	expires             time.Time
+	stopping            bool
+	signal              chan struct{}
+	requests            map[*request]struct{}
+	sessions            map[*Session]struct{}
+	connections         map[net.Conn]*connection
+	untrackedCompletion bool
+}
+
+// A connection keeps at most one completed HTTP/2 barrier, plus live handlers.
+// net/http may report HTTP/2 Idle before the final frame has been flushed.
+type connection struct {
 	requests map[*request]struct{}
-	sessions map[*Session]struct{}
+	http2    bool
 }
 
 type request struct {
@@ -66,7 +75,8 @@ type Status struct {
 
 func New() *Controller {
 	return &Controller{now: time.Now, instance: uuid.NewString(), signal: make(chan struct{}),
-		requests: make(map[*request]struct{}), sessions: make(map[*Session]struct{})}
+		requests: make(map[*request]struct{}), sessions: make(map[*Session]struct{}),
+		connections: make(map[net.Conn]*connection)}
 }
 
 func (d *Controller) expireLocked() {
@@ -80,6 +90,16 @@ func (d *Controller) statusLocked() Status {
 	d.expireLocked()
 	s := Status{SchemaVersion: 1, InstanceID: d.instance, Draining: d.owner != "", Stopping: d.stopping,
 		ActiveRequests: len(d.requests), WebsocketSessions: len(d.sessions)}
+	// Completed H2 requests coalesce into a single conservative barrier per
+	// connection. Missing connection metadata also needs only one sticky barrier.
+	for _, conn := range d.connections {
+		if conn.http2 && len(conn.requests) == 0 {
+			s.ActiveRequests++
+		}
+	}
+	if d.untrackedCompletion {
+		s.ActiveRequests++
+	}
 	if s.Draining && !s.Stopping {
 		s.LeaseRemainingMS = max(0, d.expires.Sub(d.now()).Milliseconds())
 	}
@@ -129,11 +149,16 @@ func (d *Controller) Cancel(instance, owner string) bool {
 // CommitStop checks readiness and permanently fences admission in the same lock.
 // The caller must stop THIS server after success. An external readiness check
 // followed by killing a PID is unsafe: its lease could expire in between.
-func (d *Controller) CommitStop(instance, owner string) bool {
+func (d *Controller) CommitStop(instance, owner string, canStop func() bool) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	s := d.statusLocked()
 	if instance != d.instance || owner == "" || owner != d.owner || !s.Ready {
+		return false
+	}
+	// Read detached-work blockers only AFTER admitted handlers are known to
+	// have finished, while the admission lock prevents a new handoff or turn.
+	if canStop != nil && !canStop() {
 		return false
 	}
 	d.stopping = true
@@ -153,19 +178,31 @@ func (d *Controller) ConnState(conn net.Conn, state http.ConnState) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for ticket := range d.requests {
-		if ticket.conn == conn {
-			if ticket.http2 && state == http.StateIdle {
-				continue
-			}
-			ticket.flushed = true
-			if state == http.StateClosed {
-				ticket.socketClosed = true
-			}
-			if ticket.returned && (!ticket.hijacked || ticket.socketClosed) {
-				delete(d.requests, ticket)
-			}
+	tracked := d.connections[conn]
+	if tracked == nil {
+		return
+	}
+	for ticket := range tracked.requests {
+		if ticket.http2 && state == http.StateIdle {
+			continue
 		}
+		ticket.flushed = true
+		if state == http.StateClosed {
+			ticket.socketClosed = true
+		}
+		if ticket.returned && (!ticket.hijacked || ticket.socketClosed) {
+			d.dropLocked(ticket)
+		}
+	}
+	if state == http.StateClosed {
+		delete(d.connections, conn)
+	}
+}
+
+func (d *Controller) dropLocked(ticket *request) {
+	delete(d.requests, ticket)
+	if conn := d.connections[ticket.conn]; conn != nil {
+		delete(conn.requests, ticket)
 	}
 }
 
@@ -179,6 +216,15 @@ func (d *Controller) admit(r *http.Request) (*request, bool) {
 	conn, _ := r.Context().Value(connectionKey).(net.Conn)
 	ticket := &request{controller: d, conn: conn, http2: r.ProtoMajor >= 2}
 	d.requests[ticket] = struct{}{}
+	if conn != nil {
+		tracked := d.connections[conn]
+		if tracked == nil {
+			tracked = &connection{requests: make(map[*request]struct{})}
+			d.connections[conn] = tracked
+		}
+		tracked.http2 = tracked.http2 || ticket.http2
+		tracked.requests[ticket] = struct{}{}
+	}
 	return ticket, true
 }
 
@@ -187,8 +233,23 @@ func (t *request) finish() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	t.returned = true
-	if t.flushed && (!t.hijacked || t.socketClosed) {
-		delete(d.requests, t)
+	if _, counted := d.requests[t]; !counted {
+		return
+	}
+	if t.hijacked {
+		if t.socketClosed {
+			d.dropLocked(t)
+		}
+		return
+	}
+	if t.http2 && t.conn != nil {
+		// The connection, not every historical request, owns the completion barrier.
+		d.dropLocked(t)
+	} else if t.flushed {
+		d.dropLocked(t)
+	} else if t.conn == nil {
+		d.untrackedCompletion = true
+		d.dropLocked(t)
 	}
 }
 
@@ -224,7 +285,7 @@ func ManageWebsocket(ctx context.Context) *Session {
 	defer d.mu.Unlock()
 	session := &Session{controller: d, busy: true}
 	d.sessions[session] = struct{}{}
-	delete(d.requests, ticket)
+	d.dropLocked(ticket)
 	return session
 }
 
@@ -314,10 +375,13 @@ type hijackedConn struct {
 func (c *hijackedConn) Close() error {
 	err := c.Conn.Close()
 	d := c.ticket.controller
+	// Hijacked sockets do not get a later net/http Closed callback.
+	d.ConnState(c.ticket.conn, http.StateClosed)
 	d.mu.Lock()
 	c.ticket.socketClosed = true
+	c.ticket.flushed = true
 	if c.ticket.returned {
-		delete(d.requests, c.ticket)
+		d.dropLocked(c.ticket)
 	}
 	d.mu.Unlock()
 	return err

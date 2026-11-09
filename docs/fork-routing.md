@@ -151,11 +151,15 @@ v0 alias. `GET /v8/management/server/drain` returns schema 1 with an opaque
 `instance_id`, `supported`, `blockers`, `draining`, `stopping`,
 `lease_remaining_ms`, `active_requests`, `websocket_sessions`,
 `active_websocket_turns` and `ready`. Counts never include payloads, credentials,
-session identifiers or lease tokens. Health, panel and read-only management
-requests do not count. Management writes and custom inference routes do count.
+session identifiers or lease tokens. Health, panel and explicitly listed
+read-only management requests do not count. OAuth GETs are mutating requests
+and obey the same fence as credential writes. Management writes and custom inference routes do count.
 HTTP requests remain active until their handler returns **and** net/http finishes
 flushing the response. HTTP/2 reports idle before its final frame flush, so
-connections that carried inference must close naturally before an update. Unknown WebSocket types count for their full lifetime, including handlers that
+connections that carried inference must close naturally before an update.
+Completed requests coalesce into one completion barrier per HTTP/2 connection;
+only live handlers retain individual request tickets. Missing connection
+metadata similarly keeps one fail-closed barrier rather than request history. Unknown WebSocket types count for their full lifetime, including handlers that
 return after handing the socket to a background goroutine. If an embedder serves
 `Handler()` without the server's connection callbacks, HTTP requests cannot be
 proven flushed and maintenance defers.
@@ -173,7 +177,7 @@ proven flushed and maintenance defers.
    readiness follows socket and upstream execution-session cleanup.
 4. When `ready`, atomically select the candidate in the supervisor's launch path,
    then POST the same owner body to `/v8/management/server/drain/stop`. The proxy
-   rechecks ownership, lease and readiness under its admission lock and commits
+   rechecks ownership, lease, readiness and detached-work blockers under its admission lock and commits
    a permanent fence before stopping **its own** API server. It returns 202.
    The service exits; a supervisor such as systemd `Restart=always` launches the
    selected binary. Do not replace this step with a readiness GET followed by
@@ -184,7 +188,10 @@ proven flushed and maintenance defers.
    is lost, inspect the service and running executable; never kill the original
    process based on an ambiguous response.
 
-Home, configured/loaded plugins and detached realtime calls report blockers.
+Home, configured/loaded plugins, detached realtime calls and pending OAuth
+logins or credential commits report blockers. The stop commit checks those
+blockers after all admitted handlers have completed, while holding the admission
+lock, so a request cannot hand off new detached work between the checks.
 Their background work has no complete drain accounting, so automated maintenance
 must defer. An in-flight WebRTC bootstrap remains counted until its detached
 session is visible. The status reports runtime support separately from the

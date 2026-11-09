@@ -62,7 +62,9 @@ func runOfflineCommand(args []string, stdout, stderr io.Writer) (bool, int) {
 	_ = doc.Set("config_check", true)
 	_ = doc.Set("routing_status_path", "/v8/management/routing/status")
 	_ = doc.Set("routing_strategies", []string{"round-robin", "weighted-round-robin", "fill-first", "soonest-reset-first"})
-	_ = doc.Set("safe_drain", false)
+	_ = doc.Set("safe_drain", true)
+	_ = doc.Set("drain_schema_version", 1)
+	_ = doc.Set("drain_status_path", "/v8/management/server/drain")
 	fmt.Fprintln(stdout, doc.String())
 	return true, 0
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/maintenance"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
@@ -41,6 +42,7 @@ import (
 type Server struct {
 	// engine is the Gin web framework engine instance.
 	engine *gin.Engine
+	drain  *maintenance.Controller
 
 	// server is the underlying HTTP server.
 	server *http.Server
@@ -158,6 +160,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Create server instance
 	s := &Server{
 		engine:                       engine,
+		drain:                        maintenance.New(),
 		handlers:                     handlers.NewBaseAPIHandlers(effectiveSDKConfig(cfg), authManager),
 		cfg:                          cfg,
 		accessManager:                accessManager,
@@ -268,7 +271,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Create HTTP server
 	s.server = &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler:           wrapUnconsumedRequestBodyHandler(engine),
+		Handler:           s.drain.Wrap(wrapUnconsumedRequestBodyHandler(engine), s.drainExempt),
+		ConnContext:       s.drain.ConnContext,
+		ConnState:         s.drain.ConnState,
 		ReadHeaderTimeout: muxSniffDeadline,
 	}
 

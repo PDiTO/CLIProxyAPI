@@ -16,6 +16,9 @@ func TestOfflineCommands(t *testing.T) {
 	if !handled || code != 0 || !ojson.Valid(out.String()) || !strings.Contains(out.String(), "soonest-reset-first") {
 		t.Fatalf("capabilities: handled=%v code=%d out=%q err=%q", handled, code, out.String(), errOut.String())
 	}
+	if !ojson.Get(out.String(), "safe_drain").Bool() || ojson.Get(out.String(), "drain_schema_version").Int() != 1 || ojson.Get(out.String(), "drain_status_path").String() != "/v8/management/server/drain" {
+		t.Fatalf("missing drain capability: %s", out.String())
+	}
 	for _, tc := range []struct {
 		name, data string
 		valid      bool

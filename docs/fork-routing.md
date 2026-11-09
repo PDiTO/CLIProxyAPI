@@ -129,7 +129,8 @@ Stock upstream has no equivalent checker. This fork supports both Go flag forms:
 
 Capabilities are one JSON line with `schema_version: 1`, `config_check: true`,
 `routing_status_path`, `routing_strategies`, `version`, `commit` and
-`safe_drain: false`. The checker parses v8 and legacy configs, rejects unknown
+`safe_drain: true`, `drain_schema_version: 1` and
+`drain_status_path: /v8/management/server/drain`. The checker parses v8 and legacy configs, rejects unknown
 routing strategies and returns `{"valid":true}` or a nonzero exit code. It never
 starts a listener, bootstraps plugins, loads `.env`, reads auth files, acquires or
 refreshes credentials, or rewrites config. Errors omit config contents.
@@ -138,11 +139,65 @@ It validates local parsing and supported strategy, not upstream availability.
 Stage and checksum the candidate first, verify these capabilities, then validate
 the proposed config with that candidate before replacing the installed binary or
 config. Keep a copy of the working binary outside mise's prune directory.
-Rollback to it if startup fails. This backend does **not** implement safe drain.
-Shutdown immediately closes active HTTP requests and WebSockets, including idle
-sockets that retain continuation state. Defer restart until no connections are
-established and no request has arrived for five minutes. Persistent sockets may
-defer indefinitely; disconnect/drain needs a separate operator decision.
+Rollback to it if startup fails. Ordinary shutdown still immediately closes
+connections. Use the authenticated drain protocol below before an automated
+update. Older binaries without this protocol still require zero established
+connections and five minutes without requests.
+
+## Safe update drain
+
+All drain endpoints use the existing v8 management authentication. There is no
+v0 alias. `GET /v8/management/server/drain` returns schema 1 with an opaque
+`instance_id`, `supported`, `blockers`, `draining`, `stopping`,
+`lease_remaining_ms`, `active_requests`, `websocket_sessions`,
+`active_websocket_turns` and `ready`. Counts never include payloads, credentials,
+session identifiers or lease tokens. Health, panel and read-only management
+requests do not count. Management writes and custom inference routes do count.
+HTTP requests remain active until their handler returns **and** net/http finishes
+flushing the response. HTTP/2 reports idle before its final frame flush, so
+connections that carried inference must close naturally before an update. Unknown WebSocket types count for their full lifetime, including handlers that
+return after handing the socket to a background goroutine. If an embedder serves
+`Handler()` without the server's connection callbacks, HTTP requests cannot be
+proven flushed and maintenance defers.
+
+1. Stage and validate the retained candidate before acquiring a drain.
+2. POST to the status path with `{"instance_id":"<from GET>",
+   "owner_token":"<random 32-128 character token>"}`. An exclusive two-minute
+   lease fences new requests with retryable 503 and `Retry-After: 2`.
+   Existing responses continue without a new network deadline. Repeating the
+   same POST is idempotent and does not extend its lease.
+3. Idle Responses WebSockets close with the existing 1012 replay-required
+   protocol. Clients must reconnect and resend full conversation history.
+   Sessions awaiting tool results remain busy, and their continuations can
+   finish. Duplex steering stays busy until its execution returns. Restart
+   readiness follows socket and upstream execution-session cleanup.
+4. When `ready`, atomically select the candidate in the supervisor's launch path,
+   then POST the same owner body to `/v8/management/server/drain/stop`. The proxy
+   rechecks ownership, lease and readiness under its admission lock and commits
+   a permanent fence before stopping **its own** API server. It returns 202.
+   The service exits; a supervisor such as systemd `Restart=always` launches the
+   selected binary. Do not replace this step with a readiness GET followed by
+   killing a PID. The lease could expire and admit work between those actions.
+5. On an abort before stop, DELETE the status path with the same owner body.
+   If the updater crashes or loses contact, the lease expires and restores
+   admission. A committed stop cannot expire or be cancelled. If the stop reply
+   is lost, inspect the service and running executable; never kill the original
+   process based on an ambiguous response.
+
+Home, configured/loaded plugins and detached realtime calls report blockers.
+Their background work has no complete drain accounting, so automated maintenance
+must defer. An in-flight WebRTC bootstrap remains counted until its detached
+session is visible. The status reports runtime support separately from the
+binary's protocol capability. Authentication failure, malformed/unknown schema,
+instance changes and unavailable status must defer rather than fall back to a
+less strict check. The normal direct Stop semantics remain unchanged.
+
+Opt-in client compatibility test, using only an isolated local executor:
+
+```bash
+CLIPROXY_CODEX_DRAIN_SMOKE=1 go test ./internal/api -run '^TestDrainCodexClientReplaysConversation$' -v
+```
+
 
 ## Fork sync and releases
 

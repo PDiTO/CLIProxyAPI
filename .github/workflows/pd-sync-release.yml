@@ -102,7 +102,7 @@ jobs:
             echo
             echo 'Includes cli-proxy-api, config.example.yaml, upstream license/readmes and release metadata.'
             echo 'Validate the staged candidate with --capabilities and --check-config before promotion.'
-            echo 'Shutdown is immediate. Defer restart while any live connection remains.'
+            echo 'Use the authenticated v8 drain protocol before supervised updates. Older running binaries still require a quiet restart window.'
             echo
             cat dist/release-metadata.json
             echo

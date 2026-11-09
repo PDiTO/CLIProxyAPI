@@ -25,7 +25,16 @@ the group's returned windows until their latest reset.
 Additional pools apply only when their normalized `limit_name` exactly matches
 the requested upstream model; a matched named pool replaces the default pool. Code-review limits and credits never rank ordinary
 inference. Claude uses `five_hour`, `seven_day`, and applicable `seven_day_opus`
-or `seven_day_sonnet` windows. A Claude window with null reset and zero or null
+or `seven_day_sonnet` windows. Fable requests also check the `weekly_scoped`
+Fable entry in `limits`, with the active entry preferred when duplicates exist.
+Older non-dollar `iguana_necktie` counters are supported when no scoped Fable
+entry is present. Fable quota supplements the shared weekly and five-hour limits;
+exhausting any applicable limit skips the account. It does not affect requests
+for other model families. Among usable accounts, the earliest applicable weekly
+reset drives ordering, normally the same boundary for shared and Fable quota.
+Model aliases resolve before the Fable family check. Reset grants are never
+spent automatically; subsequent successful usage probes observe restored quota.
+A Claude window with null reset and zero or null
 utilization has not started and is omitted. A null optional Codex named pool is
 also omitted. Other Claude usage groups are not interpreted.
 

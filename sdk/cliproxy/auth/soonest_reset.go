@@ -74,7 +74,14 @@ func applicableWindow(w RoutingWindow, model string) bool {
 	if w.model == "opus" || w.model == "sonnet" {
 		return strings.Contains(model, w.model)
 	}
+	if w.model == "fable" {
+		return isClaudeFableModel(model)
+	}
 	return normalizeQuotaModel(model) == w.model
+}
+
+func isClaudeFableModel(model string) bool {
+	return strings.HasPrefix(strings.ToLower(canonicalModelKey(model)), "claude-fable-")
 }
 
 func normalizeQuotaModel(model string) string {

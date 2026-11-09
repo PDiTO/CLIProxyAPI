@@ -1153,6 +1153,16 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	if quota := soonestSelector(s.fallback); quota != nil {
+		ctx = WithCodexClientRequest(ctx, IsCodexClientRequest(ctx, opts.Headers))
+		usable := make([]*Auth, 0, len(auths))
+		for _, a := range auths {
+			if a != nil && (IsCodexUseSIWCForRequest(ctx, a, opts.Headers) || quota.blockedUntil(a, routingQuotaModel(ctx, a, model), time.Now()).IsZero()) {
+				usable = append(usable, a)
+			}
+		}
+		auths = usable
+	}
 	entry := selectorLogEntry(ctx)
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any)

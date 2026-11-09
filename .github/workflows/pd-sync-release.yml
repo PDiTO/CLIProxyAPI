@@ -1,0 +1,129 @@
+# Fork-only merge, verify and atomic release. Never reset custom main to upstream.
+name: Fork sync, verify and release
+
+on:
+  schedule:
+    - cron: '37 */6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pd-sync-release-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  verify-pr:
+    if: github.repository == 'PDiTO/CLIProxyAPI' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify
+        run: bash .github/scripts/pd-verify.sh
+
+  sync-release:
+    if: github.repository == 'PDiTO/CLIProxyAPI' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Merge upstream main
+        id: merge
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+          git fetch --tags upstream main
+          before=$(git rev-parse HEAD)
+          if ! git merge --no-edit upstream/main; then
+            git merge --abort || true
+            echo 'Upstream merge conflicted; retaining the last published release.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if [[ "$before" != "$(git rev-parse HEAD)" ]]; then
+            echo 'merged=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify merged tree
+        run: bash .github/scripts/pd-verify.sh
+      - name: Stage complete release
+        id: stage
+        run: |
+          set -euo pipefail
+          base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' upstream/main)
+          tag="pd-${base}-$(date -u +%Y%m%d%H%M%S)-$(git rev-parse --short=12 HEAD)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          bash .github/scripts/pd-build-release.sh "$tag" upstream/main
+      - name: Push verified merge
+        if: steps.merge.outputs.merged == 'true'
+        env:
+          # Built-in tokens cannot push changes to workflow files. See docs/fork-routing.md.
+          PUSH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          git -c credential.helper= -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)" push origin HEAD:main
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.stage.outputs.tag }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          # No duplicate release when a scheduled run has no new commits.
+          latest_sha=$(gh release view --json targetCommitish --jq .targetCommitish 2>/dev/null || true)
+          if [[ "$latest_sha" == "$sha" ]]; then
+            echo "Already released $sha" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo 'Quota-aware routing fork. Portable Linux amd64 build, dynamic plugins disabled.'
+            echo
+            echo 'Includes cli-proxy-api, config.example.yaml, upstream license/readmes and release metadata.'
+            echo 'Validate the staged candidate with --capabilities and --check-config before promotion.'
+            echo 'Shutdown is immediate. Defer restart while any live connection remains.'
+            echo
+            cat dist/release-metadata.json
+            echo
+            git log --oneline -15
+          } > notes.md
+          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/checksums.txt dist/routing-capabilities.json dist/release-metadata.json \
+            --draft --target "$sha" --title "$RELEASE_TAG" --notes-file notes.md
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+          echo "Published $RELEASE_TAG at $sha" >> "$GITHUB_STEP_SUMMARY"
+      - name: Report failure without replacing latest release
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title='Upstream sync or release failed'
+          printf 'Run: %s/%s/actions/runs/%s\n\nMerge, verification, build, push or publish failed. The last published release remains available. Inspect this run before retrying; never force-reset the fork.\n\nWorkflow-changing merges need a SYNC_TOKEN with contents and workflows write access. See docs/fork-routing.md.\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > failure.md
+          cat failure.md >> "$GITHUB_STEP_SUMMARY"
+          existing=$(gh issue list --state open --search '"Upstream sync or release failed" in:title' --json number --jq '.[0].number')
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --body-file failure.md
+          else
+            gh issue create --title "$title" --body-file failure.md
+          fi

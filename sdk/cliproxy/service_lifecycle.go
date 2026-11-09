@@ -124,6 +124,10 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}
 
+	if s.coreManager != nil && !homeEnabled {
+		s.coreManager.StartRoutingQuotaRefresh(ctx)
+	}
+
 	// legacy clients removed; no caches to refresh
 
 	s.ensureWebsocketGateway()

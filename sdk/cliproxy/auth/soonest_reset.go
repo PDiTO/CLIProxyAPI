@@ -1,0 +1,235 @@
+package auth
+
+import (
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+)
+
+const RoutingQuotaRefreshInterval = 5 * time.Minute
+const RoutingQuotaMaxAge = 15 * time.Minute
+
+// RoutingWindow is a validated provider subscription window, never an upstream body.
+type RoutingWindow struct {
+	Key         string    `json:"key"`
+	ResetsAt    time.Time `json:"resets_at"`
+	UsedPercent float64   `json:"used_percent"`
+	seconds     int64
+	model       string
+	denied      bool
+}
+
+type routingQuotaRecord struct {
+	fingerprint [32]byte
+	observedAt  time.Time
+	attemptedAt time.Time
+	windows     []RoutingWindow
+	errorCode   string
+}
+
+// SoonestResetSelector ranks new sessions after the manager's normal eligibility checks.
+// It deliberately uses the custom-selector path, preserving upstream alias resolution.
+type SoonestResetSelector struct {
+	mu       sync.RWMutex
+	records  map[string]routingQuotaRecord
+	inFlight map[string]bool
+}
+
+func soonestSelector(selector Selector) *SoonestResetSelector {
+	if affinity, ok := selector.(*SessionAffinitySelector); ok {
+		selector = affinity.fallback
+	}
+	s, _ := selector.(*SoonestResetSelector)
+	return s
+}
+
+func quotaFingerprint(a *Auth) [32]byte {
+	// Token replacement or re-registration invalidates observations without retaining secrets.
+	token, _ := a.Metadata["access_token"].(string)
+	account, _ := a.Metadata["account_id"].(string)
+	return sha256.Sum256([]byte(fmt.Sprintf("%d:%d:%s:%s:%s", a.RegistrationEpoch, a.CredentialVersion, a.Provider, account, token)))
+}
+
+func (s *SoonestResetSelector) record(a *Auth) routingQuotaRecord {
+	s.mu.RLock()
+	r := s.records[a.ID]
+	s.mu.RUnlock()
+	if r.fingerprint != quotaFingerprint(a) {
+		return routingQuotaRecord{}
+	}
+	return r
+}
+
+func applicableWindow(w RoutingWindow, model string) bool {
+	if w.model == "" {
+		return true
+	}
+	model = strings.ToLower(model)
+	if w.model == "opus" || w.model == "sonnet" {
+		return strings.Contains(model, w.model)
+	}
+	return normalizeQuotaModel(model) == w.model
+}
+
+func normalizeQuotaModel(model string) string {
+	var b strings.Builder
+	for _, c := range strings.ToLower(canonicalModelKey(model)) {
+		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
+
+func (s *SoonestResetSelector) view(a *Auth, model string, now time.Time) (routingQuotaRecord, *RoutingWindow, string, time.Time) {
+	if a.AuthKind() != AuthKindOAuth || (a.Provider != "codex" && a.Provider != "claude") {
+		return routingQuotaRecord{}, nil, "unsupported", time.Time{}
+	}
+	r := s.record(a)
+	if r.observedAt.IsZero() {
+		state := "missing"
+		if r.errorCode == "malformed" {
+			state = "malformed"
+		}
+		return r, nil, state, time.Time{}
+	}
+	if now.Before(r.observedAt) || now.Sub(r.observedAt) > RoutingQuotaMaxAge {
+		return r, nil, "stale", time.Time{}
+	}
+	var selected *RoutingWindow
+	var blockedUntil time.Time
+	expired := false
+	// Codex named pools are independent of the default request pool.
+	namedCodexPool := false
+	if a.Provider == "codex" {
+		for _, w := range r.windows {
+			if w.model != "" && applicableWindow(w, model) {
+				namedCodexPool = true
+				break
+			}
+		}
+	}
+	for _, window := range r.windows {
+		if namedCodexPool && window.model == "" {
+			continue
+		}
+		if !applicableWindow(window, model) {
+			continue
+		}
+		if !window.ResetsAt.After(now) {
+			expired = true
+			continue
+		}
+		w := window
+		if (w.UsedPercent >= 100 || w.denied) && w.ResetsAt.After(blockedUntil) {
+			blockedUntil = w.ResetsAt
+		}
+		if selected == nil || w.seconds > selected.seconds || (w.seconds == selected.seconds && (w.ResetsAt.Before(selected.ResetsAt) || (w.ResetsAt.Equal(selected.ResetsAt) && w.Key < selected.Key))) {
+			selected = &w
+		}
+	}
+	// An elapsed window is unknown, not renewed quota. Refresh must establish its next cycle.
+	if expired {
+		return r, nil, "expired", blockedUntil
+	}
+	if selected == nil {
+		return r, nil, "missing", blockedUntil
+	}
+	return r, selected, "fresh", blockedUntil
+}
+
+func (s *SoonestResetSelector) viewForRequest(ctx context.Context, a *Auth, model string, now time.Time) (routingQuotaRecord, *RoutingWindow, string, time.Time) {
+	if IsCodexUseSIWCForRequest(ctx, a) {
+		return routingQuotaRecord{}, nil, "unsupported", time.Time{}
+	}
+	return s.view(a, model, now)
+}
+
+func (s *SoonestResetSelector) blockedUntil(a *Auth, model string, now time.Time) time.Time {
+	_, _, _, until := s.view(a, model, now)
+	return until
+}
+
+type routingQuotaModelsKey struct{}
+
+func routingQuotaModel(ctx context.Context, a *Auth, fallback string) string {
+	if ctx != nil {
+		if models, ok := ctx.Value(routingQuotaModelsKey{}).(map[string]string); ok {
+			if model, found := models[a.ID]; found {
+				return model
+			}
+		}
+	}
+	return fallback
+}
+
+func (m *Manager) routingQuotaContext(ctx context.Context, selector Selector, auths []*Auth, model string) context.Context {
+	if soonestSelector(selector) == nil {
+		return ctx
+	}
+	models := make(map[string]string, len(auths))
+	for _, a := range auths {
+		models[a.ID] = m.selectionModelForAuth(a, model)
+	}
+	return context.WithValue(ctx, routingQuotaModelsKey{}, models)
+}
+
+func (s *SoonestResetSelector) rank(auths []*Auth, model string, now time.Time) []*Auth {
+	return s.rankForRequest(context.Background(), auths, model, now)
+}
+
+func (s *SoonestResetSelector) rankForRequest(ctx context.Context, auths []*Auth, model string, now time.Time) []*Auth {
+	ranked := append([]*Auth(nil), auths...)
+	windows := make(map[string]*RoutingWindow, len(auths))
+	for _, a := range auths {
+		_, windows[a.ID], _, _ = s.viewForRequest(ctx, a, routingQuotaModel(ctx, a, model), now)
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		a, b := ranked[i], ranked[j]
+		if authPriority(a) != authPriority(b) {
+			return authPriority(a) > authPriority(b)
+		}
+		wa, wb := windows[a.ID], windows[b.ID]
+		if (wa != nil) != (wb != nil) {
+			return wa != nil
+		}
+		if wa != nil && !wa.ResetsAt.Equal(wb.ResetsAt) {
+			return wa.ResetsAt.Before(wb.ResetsAt)
+		}
+		return a.ID < b.ID
+	})
+	return ranked
+}
+
+func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	ctx = WithCodexClientRequest(ctx, IsCodexClientRequest(ctx, opts.Headers))
+	now := time.Now()
+	usable := make([]*Auth, 0, len(auths))
+	var earliest time.Time
+	for _, a := range auths {
+		if a == nil {
+			continue
+		}
+		_, _, _, until := s.viewForRequest(ctx, a, routingQuotaModel(ctx, a, model), now)
+		if until.IsZero() {
+			usable = append(usable, a)
+		} else if earliest.IsZero() || until.Before(earliest) {
+			earliest = until
+		}
+	}
+	if len(usable) == 0 && !earliest.IsZero() {
+		return nil, newModelCooldownError(model, provider, earliest.Sub(now))
+	}
+	available, err := getSelectorAvailableAuths(ctx, usable, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	return s.rankForRequest(ctx, available, model, now)[0], nil
+}

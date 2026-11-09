@@ -28,6 +28,10 @@ func (s *Server) registerManagementV8Routes() {
 	}
 
 	v8.GET("/server/latest-version", s.mgmt.GetLatestVersion)
+	v8.GET("/server/drain", s.getDrain)
+	v8.POST("/server/drain", s.beginDrain)
+	v8.DELETE("/server/drain", s.cancelDrain)
+	v8.POST("/server/drain/stop", s.stopDrained)
 	v8.POST("/requests/api-call", s.mgmt.APICall)
 	v8.POST("/routing/cooldown/reset", s.mgmt.ResetQuota)
 	v8.GET("/routing/status", s.mgmt.GetRoutingStatus)

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"math"
+	"strings"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -78,28 +79,62 @@ func parseRoutingQuota(provider string, data []byte, now time.Time) ([]RoutingWi
 			})
 		}
 	} else if provider == "claude" {
-		for _, spec := range []struct {
-			key, model string
-			seconds    int64
-		}{{"five_hour", "", 18000}, {"seven_day", "", 604800}, {"seven_day_opus", "opus", 604800}, {"seven_day_sonnet", "sonnet", 604800}} {
-			w := root.Get(spec.key)
+		add := func(w ojson.Result, key, model, usageKey string, seconds int64) {
 			if !w.Exists() || w.Type == ojson.Null {
-				continue
+				return
 			}
-			util := w.Get("utilization")
+			util := w.Get(usageKey)
 			used, ok := quotaNumber(util)
 			reset := w.Get("resets_at")
 			// Claude has no reset for a window that has not started this period.
 			if reset.Exists() && reset.Type == ojson.Null && util.Exists() && (util.Type == ojson.Null || (ok && used == 0)) {
 				idle = true
-				continue
+				return
 			}
 			resetAt, err := time.Parse(time.RFC3339Nano, reset.String())
 			if !ok || reset.Type != ojson.String || err != nil || resetAt.After(now.Add(32*24*time.Hour)) {
 				malformed = true
-				continue
+				return
 			}
-			windows = append(windows, RoutingWindow{Key: spec.key, ResetsAt: resetAt, UsedPercent: used, seconds: spec.seconds, model: spec.model})
+			windows = append(windows, RoutingWindow{Key: key, ResetsAt: resetAt, UsedPercent: used, seconds: seconds, model: model})
+		}
+		for _, spec := range []struct {
+			key, model string
+			seconds    int64
+		}{{"five_hour", "", 18000}, {"seven_day", "", 604800}, {"seven_day_opus", "opus", 604800}, {"seven_day_sonnet", "sonnet", 604800}} {
+			add(root.Get(spec.key), spec.key, spec.model, "utilization", spec.seconds)
+		}
+		// Scoped Fable quota supplements the shared windows. Prefer the active
+		// modern entry over a duplicate or legacy counter, as the dashboard does.
+		var fable ojson.Result
+		limits := root.Get("limits")
+		if limits.Exists() && limits.Type != ojson.Null && !limits.IsArray() {
+			malformed = true
+		}
+		limits.ForEach(func(_, limit ojson.Result) bool {
+			name := strings.ToLower(strings.TrimSpace(limit.Get("scope.model.display_name").String()))
+			isFable := name == "fable" || name == "fable 5"
+			if strings.ToLower(strings.TrimSpace(limit.Get("kind").String())) != "weekly_scoped" || !isFable {
+				return true
+			}
+			if !fable.Exists() || (fable.Get("is_active").Type != ojson.True && limit.Get("is_active").Type == ojson.True) {
+				fable = limit
+			}
+			return true
+		})
+		if fable.Exists() {
+			add(fable, "seven_day_fable", "fable", "percent", 604800)
+		} else {
+			legacy := root.Get("iguana_necktie")
+			// This legacy key is also used for dollar balances on some plans.
+			// Those credits are not a subscription quota or a reset deadline.
+			for _, key := range []string{"limit_dollars", "used_dollars", "remaining_dollars"} {
+				if value := legacy.Get(key); value.Exists() && value.Type != ojson.Null {
+					legacy = ojson.Result{}
+					break
+				}
+			}
+			add(legacy, "seven_day_fable", "fable", "utilization", 604800)
 		}
 	}
 	// A partly malformed snapshot cannot establish that all applicable limits are usable.

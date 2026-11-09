@@ -3927,8 +3927,18 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 		registry.GetGlobalRegistry().UnregisterClient(authEntry.ID)
 	})
 
-	httpServer := httptest.NewServer(server.engine)
-	defer httpServer.Close()
+	var handlers sync.WaitGroup
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlers.Add(1)
+		defer handlers.Done()
+		server.engine.ServeHTTP(w, r)
+	}))
+	defer func() {
+		httpServer.Close()
+		// httptest does not wait for hijacked WebSockets. Let their handler and
+		// request logger finish before t.TempDir removes the log directory.
+		handlers.Wait()
+	}()
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/responses"
 	headers := http.Header{"Authorization": []string{"Bearer key-1"}}

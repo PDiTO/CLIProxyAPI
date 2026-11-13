@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>CLIProxyAPI</title>
+  <rect width="64" height="64" rx="14" fill="#0f1219"/>
+  <path d="M12 20 L24 32 L12 44" fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <g stroke-width="6" stroke-linecap="round">
+    <path d="M32 20 H52" stroke="#4d8dff"/>
+    <path d="M32 32 H52" stroke="#9aa6ff"/>
+    <path d="M32 44 H52" stroke="#f2783a"/>
+  </g>
+</svg>

@@ -747,6 +747,9 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 	for _, entry := range entries {
 		models = append(models, formatHomeCodexModelWithSettings(entry, cfg))
 	}
+	if cfg != nil {
+		models = codexmodels.FilterByProviders(models, cfg.Client.Codex.CatalogProviders, homeProvidersForModel(entries))
+	}
 
 	var webSearchCapabilityForModel codexmodels.WebSearchCapabilityForModelFunc
 	if clientVersion == "cpa" {

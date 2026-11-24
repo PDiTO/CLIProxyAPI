@@ -429,6 +429,10 @@ client:
     # Default false. Applies to both OAuth and API-key credentials across providers.
     # Legacy provider paths migrate here; this path wins conflicts, including explicit false.
     optimize-multi-agent-v2: false
+    # Limit the model catalog Codex clients fetch (/v1/models?client_version=...) to models
+    # served by at least one comma-separated provider, e.g. "codex" for ChatGPT accounts only.
+    # Requests are routed as before. Default (empty) lists every available model.
+    # catalog-providers: "codex"
     # Cache upstream web search results per session so replayed Codex web_search_call items
     # that omit results still retain search results in later turns.
     web-search-result-cache:

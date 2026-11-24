@@ -148,6 +148,12 @@ type CodexClientConfig struct {
 	// Default false clears the capability regardless of template metadata.
 	EnableApplyPatch bool `yaml:"enable-apply-patch" json:"enable-apply-patch"`
 
+	// CatalogProviders limits the Codex client model catalog to models served by
+	// at least one of these comma-separated providers, for example "codex".
+	// A string keeps this struct comparable. Routing is unchanged.
+	// Empty lists every available model.
+	CatalogProviders string `yaml:"catalog-providers,omitempty" json:"catalog-providers,omitempty"`
+
 	// WebSearchResultCache configures caching of upstream web search results for
 	// Codex Responses clients that drop search results from replayed history.
 	WebSearchResultCache CodexWebSearchResultCacheConfig `yaml:"web-search-result-cache" json:"web-search-result-cache"`

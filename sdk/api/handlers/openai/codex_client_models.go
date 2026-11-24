@@ -12,10 +12,12 @@ func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) ma
 		version = clientVersion[0]
 	}
 	optimizeMultiAgentV2 := false
+	catalogProviders := ""
 	var applyPatchCapabilityForModel codexmodels.ApplyPatchCapabilityForModelFunc
 	if h != nil {
 		if cfg := h.CurrentConfig(); cfg != nil {
 			optimizeMultiAgentV2 = cfg.Client.Codex.OptimizeMultiAgentV2
+			catalogProviders = cfg.Client.Codex.CatalogProviders
 			if cfg.Client.Codex.EnableApplyPatch {
 				applyPatchCapabilityForModel = h.SupportsApplyPatchModel
 			}
@@ -26,7 +28,8 @@ func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) ma
 		toolSearchCapabilityForModel = h.SupportsNativeToolSearchModel
 	}
 	modelRegistry := registry.GetGlobalRegistry()
-	return codexmodels.BuildResponseForClientWithToolCapabilities(h.Models(), modelRegistry.GetModelProviders, modelRegistry.GetResponsesWebSearchCapability, applyPatchCapabilityForModel, toolSearchCapabilityForModel, optimizeMultiAgentV2, version)
+	models := codexmodels.FilterByProviders(h.Models(), catalogProviders, modelRegistry.GetModelProviders)
+	return codexmodels.BuildResponseForClientWithToolCapabilities(models, modelRegistry.GetModelProviders, modelRegistry.GetResponsesWebSearchCapability, applyPatchCapabilityForModel, toolSearchCapabilityForModel, optimizeMultiAgentV2, version)
 }
 
 // CodexClientModelsResponse builds a Codex client model response.

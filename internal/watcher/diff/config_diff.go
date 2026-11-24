@@ -173,6 +173,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Client.Codex.OptimizeMultiAgentV2 != newCfg.Client.Codex.OptimizeMultiAgentV2 {
 		changes = append(changes, fmt.Sprintf("client.codex.optimize-multi-agent-v2: %t -> %t", oldCfg.Client.Codex.OptimizeMultiAgentV2, newCfg.Client.Codex.OptimizeMultiAgentV2))
 	}
+	if strings.TrimSpace(oldCfg.Client.Codex.CatalogProviders) != strings.TrimSpace(newCfg.Client.Codex.CatalogProviders) {
+		changes = append(changes, fmt.Sprintf("client.codex.catalog-providers: %q -> %q", strings.TrimSpace(oldCfg.Client.Codex.CatalogProviders), strings.TrimSpace(newCfg.Client.Codex.CatalogProviders)))
+	}
 	if oldCfg.Client.Codex.WebSearchResultCache.Enabled != newCfg.Client.Codex.WebSearchResultCache.Enabled {
 		changes = append(changes, fmt.Sprintf("client.codex.web-search-result-cache.enabled: %t -> %t", oldCfg.Client.Codex.WebSearchResultCache.Enabled, newCfg.Client.Codex.WebSearchResultCache.Enabled))
 	}

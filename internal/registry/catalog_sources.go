@@ -389,6 +389,8 @@ func SetLocalModelCatalogs(local bool) {
 
 // StartModelCatalogUpdaters binds process-wide readers to the service lifetime.
 func StartModelCatalogUpdaters(ctx context.Context, sources CatalogSources, home bool) {
+	// Deferred first so it runs after the unlock below.
+	defer ApplyCodexModelOverrides(sources.CodexOverrides, home)
 	catalogRuntime.Lock()
 	defer catalogRuntime.Unlock()
 	catalogRuntime.ctx = ctx
@@ -400,6 +402,8 @@ func StartModelCatalogUpdaters(ctx context.Context, sources CatalogSources, home
 // UpdateModelCatalogSources updates an already-started process policy on reload.
 // Updates before service startup or after shutdown do not start readers.
 func UpdateModelCatalogSources(sources CatalogSources, home bool) {
+	// Deferred first so it runs after the unlock below.
+	defer ApplyCodexModelOverrides(sources.CodexOverrides, home)
 	catalogRuntime.Lock()
 	defer catalogRuntime.Unlock()
 	catalogRuntime.sources = sources

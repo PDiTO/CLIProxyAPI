@@ -12,6 +12,8 @@ type CatalogSources struct {
 	Catalog      string `yaml:"catalog" json:"catalog,omitempty"`
 	CodexCatalog string `yaml:"codex-catalog" json:"codex-catalog,omitempty"`
 	DevinCatalog string `yaml:"devin-catalog" json:"devin-catalog,omitempty"`
+	// CodexOverrides is a fork-only list of temporary Codex model and tier overrides.
+	CodexOverrides []CodexModelOverride `yaml:"codex-overrides,omitempty" json:"codex-overrides,omitempty"`
 }
 
 // Validate rejects relative paths and unsupported URL schemes.
@@ -25,5 +27,5 @@ func (m CatalogSources) Validate() error {
 			return fmt.Errorf("models.%s must be an http(s) URL or an absolute local path", name)
 		}
 	}
-	return nil
+	return ValidateCodexModelOverrides(m.CodexOverrides)
 }

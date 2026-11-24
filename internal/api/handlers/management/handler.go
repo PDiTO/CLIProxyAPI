@@ -271,7 +271,8 @@ func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnaps
 
 // reloadConfigAfterManagementSave reloads from an independent config snapshot.
 // Callers must pass a full Config clone captured immediately after a successful save.
-func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, snapshot configReloadSnapshot) {
+// Fork: apply runs only for a current snapshot, serialized with other reloads.
+func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, snapshot configReloadSnapshot, apply ...func(*config.Config)) {
 	if h == nil || snapshot.cfg == nil || snapshot.generation == 0 {
 		return
 	}
@@ -286,6 +287,9 @@ func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, snapshot 
 	hook := h.configReloadHook
 	host := h.pluginHost
 	h.mu.Unlock()
+	for _, fn := range apply {
+		fn(snapshot.cfg)
+	}
 	if hook != nil {
 		hook(ctx, snapshot.cfg)
 	} else if host != nil {

@@ -19,6 +19,16 @@ models:
   catalog: ""
   codex-catalog: ""
   devin-catalog: ""
+  # Fork-only: temporary Codex (ChatGPT account) overrides for models or speed
+  # tiers the upstream catalogs do not list yet. Upstream always wins: each part
+  # steps aside once the catalog provides it. Not applied in Home mode.
+  # See docs/fork-codex-model-overrides.md.
+  # codex-overrides:
+  #   - id: gpt-6.3-sol            # model upstream does not list yet
+  #     like: gpt-6.2-sol          # clone limits, thinking levels and Codex client template
+  #     display-name: "GPT 6.3 Sol" # optional
+  #   - id: gpt-6.2-astra          # existing model missing a speed tier
+  #     add-service-tiers: [ultrafast]
 
 # Listener, TLS, network discovery, and server operation.
 server:

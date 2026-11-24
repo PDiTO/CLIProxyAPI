@@ -95,6 +95,7 @@ func renderConfigSave(data []byte, persistCfg *Config, migrating bool) ([]byte, 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "antigravity", "sensitive-patterns-replace")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "devin", "sensitive-words-replace")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "devin", "sensitive-patterns-replace")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "models", "codex-overrides")
 	replacePluginConfigsSubtree(original.Content[0], generated.Content[0])
 	if persistCfg != nil && persistCfg.Claude.OAuthIncludeCreateAPIKey == nil {
 		deleteYAMLPath(original.Content[0], "claude.oauth-include-create-api-key")

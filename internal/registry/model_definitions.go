@@ -71,22 +71,26 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
 func GetCodexFreeModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexFree))
+	data := getModels()
+	return WithCodexBuiltins(withCodexModelOverrides(data, cloneModelInfos(data.CodexFree)))
 }
 
 // GetCodexTeamModels returns model definitions for the Codex team plan tier.
 func GetCodexTeamModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexTeam))
+	data := getModels()
+	return WithCodexBuiltins(withCodexModelOverrides(data, cloneModelInfos(data.CodexTeam)))
 }
 
 // GetCodexPlusModels returns model definitions for the Codex plus plan tier.
 func GetCodexPlusModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPlus))
+	data := getModels()
+	return WithCodexBuiltins(withCodexModelOverrides(data, cloneModelInfos(data.CodexPlus)))
 }
 
 // GetCodexProModels returns model definitions for the Codex pro plan tier.
 func GetCodexProModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
+	data := getModels()
+	return WithCodexBuiltins(withCodexModelOverrides(data, cloneModelInfos(data.CodexPro)))
 }
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
@@ -468,7 +472,7 @@ func staticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	case "aistudio":
 		return data.AIStudio
 	case "codex":
-		return WithCodexBuiltins(data.CodexPro)
+		return WithCodexBuiltins(withCodexModelOverrides(data, data.CodexPro))
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		return data.Kimi
 	case "antigravity":
@@ -551,7 +555,7 @@ func lookupStaticModelInfo(modelID string, additionalCatalog []*ModelInfo) *Mode
 		data.Gemini,
 		data.Vertex,
 		data.AIStudio,
-		data.CodexPro,
+		withCodexModelOverrides(data, data.CodexPro),
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,

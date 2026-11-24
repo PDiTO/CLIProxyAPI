@@ -31,14 +31,16 @@ func (s *Server) installDrain() {
 	s.server.ConnState = s.drain.ConnState
 }
 
-// registerForkManagementV8Routes adds the fork's drain and routing status
-// endpoints to the v8 management group.
+// registerForkManagementV8Routes adds the fork's drain, routing status and
+// Codex model override endpoints to the v8 management group.
 func (s *Server) registerForkManagementV8Routes(v8 *gin.RouterGroup) {
 	v8.GET("/server/drain", s.getDrain)
 	v8.POST("/server/drain", s.beginDrain)
 	v8.DELETE("/server/drain", s.cancelDrain)
 	v8.POST("/server/drain/stop", s.stopDrained)
 	v8.GET("/routing/status", s.mgmt.GetRoutingStatus)
+	v8.GET("/codex-model-overrides", s.mgmt.GetCodexModelOverrides)
+	v8.PUT("/codex-model-overrides", s.mgmt.PutCodexModelOverrides)
 }
 
 func (s *Server) drainExempt(r *http.Request) bool {

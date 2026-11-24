@@ -22,6 +22,7 @@ type codexClientModelsPayload struct {
 type codexClientModelsStore struct {
 	mu                sync.RWMutex
 	data              []byte
+	upstream          []byte
 	revision          uint64
 	responsesLiteMap  map[string]bool
 	thinkingLevelsMap map[string][]string
@@ -85,22 +86,37 @@ func CodexClientModelThinkingLevels(slug string) []string {
 }
 
 func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
-	responsesLiteMap, thinkingLevelsMap, err := parseAndValidateCodexClientModelsJSON(data)
-	if err != nil {
+	if _, _, err := parseAndValidateCodexClientModelsJSON(data); err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
 	}
 
-	cloned := append([]byte(nil), data...)
 	codexClientCatalogStore.mu.Lock()
 	defer codexClientCatalogStore.mu.Unlock()
-	if bytes.Equal(codexClientCatalogStore.data, cloned) {
-		return false, nil
+	codexClientCatalogStore.upstream = append([]byte(nil), data...)
+	return publishCodexClientModelsLocked(), nil
+}
+
+// publishCodexClientModelsLocked serves the upstream catalog with Codex model
+// overrides applied. Callers must hold codexClientCatalogStore.mu.
+func publishCodexClientModelsLocked() bool {
+	store := codexClientCatalogStore
+	effective, _ := applyCodexClientOverrides(store.upstream, currentCodexModelOverrides())
+	responsesLiteMap, thinkingLevelsMap, err := parseAndValidateCodexClientModelsJSON(effective)
+	if err != nil {
+		log.WithError(err).Warn("codex model overrides produced an invalid client catalog; serving the upstream catalog")
+		effective = store.upstream
+		if responsesLiteMap, thinkingLevelsMap, err = parseAndValidateCodexClientModelsJSON(effective); err != nil {
+			return false
+		}
 	}
-	codexClientCatalogStore.data = cloned
-	codexClientCatalogStore.responsesLiteMap = responsesLiteMap
-	codexClientCatalogStore.thinkingLevelsMap = thinkingLevelsMap
-	codexClientCatalogStore.revision++
-	return true, nil
+	if bytes.Equal(store.data, effective) {
+		return false
+	}
+	store.data = append([]byte(nil), effective...)
+	store.responsesLiteMap = responsesLiteMap
+	store.thinkingLevelsMap = thinkingLevelsMap
+	store.revision++
+	return true
 }
 
 // ValidateCodexClientModelsJSON validates the fields required to serve a

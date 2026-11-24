@@ -325,18 +325,18 @@ func applyCodexClientOverrides(upstream []byte, entries []CodexModelOverride) ([
 		index[model.Get("slug").String()] = i
 	}
 
+	// All edits stay in one document, serialized once at the return.
 	doc := ojson.NewDoc(upstream)
 	changed := false
+	next := len(models)
 	for i, entry := range entries {
 		state := CodexModelOverrideState{Model: CodexOverrideNone, Catalog: CodexOverrideNone, ServiceTiers: map[string]string{}}
 		upstreamIdx, upstreamHas := index[entry.ID]
 
-		// Edits go to the upstream entry (prefix "models.N.") or to a clone.
-		var target *ojson.Doc
-		var current ojson.Result
-		prefix := ""
+		// Tier edits go to the upstream entry or to a clone appended to models.
+		path, clone := "", false
 		if upstreamHas {
-			target, current, prefix = doc, models[upstreamIdx], "models."+strconv.Itoa(upstreamIdx)+"."
+			path = "models." + strconv.Itoa(upstreamIdx)
 		}
 		if entry.Like != "" {
 			likeIdx, likeHas := index[entry.Like]
@@ -345,63 +345,56 @@ func applyCodexClientOverrides(upstream []byte, entries []CodexModelOverride) ([
 				state.Catalog = CodexOverrideUpstream
 			case likeHas:
 				state.Catalog = CodexOverrideActive
-				target = ojson.NewDocString(models[likeIdx].Raw)
 				displayName := entry.DisplayName
 				if displayName == "" {
 					displayName = deriveCodexDisplayName(entry.ID, "-")
 				}
-				_ = target.Set("slug", entry.ID)
-				_ = target.Set("display_name", displayName)
-				current = ojson.Parse(models[likeIdx].Raw)
+				path, clone = "models."+strconv.Itoa(next), true
+				next++
+				_ = doc.SetRaw(path, models[likeIdx].Raw)
+				_ = doc.Set(path+".slug", entry.ID)
+				_ = doc.Set(path+".display_name", displayName)
+				changed = true
 			default:
 				state.Catalog = CodexOverrideInactive
 			}
 		}
 
 		for _, tier := range entry.AddServiceTiers {
-			if target == nil {
+			if path == "" {
 				state.ServiceTiers[tier] = CodexOverrideInactive
 				continue
 			}
+			current := doc.Get(path)
 			serviceID, speedID, name := codexServiceTier(tier)
 			hasService, hasSpeed := codexEntryHasTier(current, serviceID, speedID)
 			if hasService && hasSpeed {
-				if prefix != "" {
-					state.ServiceTiers[tier] = CodexOverrideUpstream
-				} else {
+				if clone {
 					state.ServiceTiers[tier] = CodexOverrideActive
+				} else {
+					state.ServiceTiers[tier] = CodexOverrideUpstream
 				}
 				continue
 			}
 			state.ServiceTiers[tier] = CodexOverrideActive
 			if !hasService {
-				if !current.Get("service_tiers").IsArray() {
-					_ = target.SetRaw(prefix+"service_tiers", "[]")
+				tiers := current.Get("service_tiers")
+				if !tiers.IsArray() {
+					_ = doc.SetRaw(path+".service_tiers", "[]")
 				}
-				// Build the object member by member to keep upstream's key order.
-				tierDoc := ojson.NewDocString(`{}`)
-				_ = tierDoc.Set("id", serviceID)
-				_ = tierDoc.Set("name", name)
-				_ = tierDoc.Set("description", "")
-				_ = target.SetRaw(prefix+"service_tiers.-1", tierDoc.String())
+				// Set members one by one to keep upstream's key order.
+				item := path + ".service_tiers." + strconv.Itoa(len(tiers.Array()))
+				_ = doc.SetRaw(item, "{}")
+				_ = doc.Set(item+".id", serviceID)
+				_ = doc.Set(item+".name", name)
+				_ = doc.Set(item+".description", "")
 			}
 			if !hasSpeed {
 				if !current.Get("additional_speed_tiers").IsArray() {
-					_ = target.SetRaw(prefix+"additional_speed_tiers", "[]")
+					_ = doc.SetRaw(path+".additional_speed_tiers", "[]")
 				}
-				_ = target.Set(prefix+"additional_speed_tiers.-1", speedID)
+				_ = doc.Set(path+".additional_speed_tiers.-1", speedID)
 			}
-			if prefix == "" {
-				// Refresh the clone view so a repeated tier is not added twice.
-				current = ojson.Parse(target.String())
-			} else {
-				current = ojson.Parse(doc.Get(strings.TrimSuffix(prefix, ".")).Raw)
-			}
-			changed = true
-		}
-
-		if target != nil && prefix == "" {
-			_ = doc.SetRaw("models.-1", target.String())
 			changed = true
 		}
 		states[i] = state

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,5 +260,48 @@ func TestValidateCodexModelOverrides(t *testing.T) {
 	}
 	if errValidate := ValidateCodexModelOverrides([]CodexModelOverride{{ID: "a", Like: "b"}, {ID: "c", AddServiceTiers: []string{"ultrafast"}}}); errValidate != nil {
 		t.Fatal(errValidate)
+	}
+}
+
+func TestCodexModelOverrideClonesTakeTiersInPlace(t *testing.T) {
+	useCodexOverrideTestCatalogs(t)
+	like, _ := codexClientModelEntry(t, "gpt-6.2-sol")
+	ApplyCodexModelOverrides([]CodexModelOverride{
+		{ID: "gpt-clone-a", Like: "gpt-6.2-sol", AddServiceTiers: []string{"ultrafast", "turbo", "turbo"}},
+		{ID: "gpt-clone-b", Like: "gpt-6.2-astra", AddServiceTiers: []string{"turbo"}},
+	}, false)
+
+	if after, count := codexClientModelEntry(t, "gpt-6.2-sol"); count != 1 || after.Raw != like.Raw {
+		t.Fatalf("like model changed or duplicated: count=%d", count)
+	}
+	for _, tc := range []struct {
+		slug  string
+		tiers string
+		speed string
+	}{
+		{"gpt-clone-a", "priority,ultrafast,turbo", "fast,ultrafast,turbo"},
+		{"gpt-clone-b", "priority,turbo", "fast,turbo"},
+	} {
+		entry, count := codexClientModelEntry(t, tc.slug)
+		if count != 1 {
+			t.Fatalf("%s appears %d times", tc.slug, count)
+		}
+		var ids, speed []string
+		for _, tier := range entry.Get("service_tiers").Array() {
+			ids = append(ids, tier.Get("id").String())
+		}
+		for _, tier := range entry.Get("additional_speed_tiers").Array() {
+			speed = append(speed, tier.String())
+		}
+		if got := strings.Join(ids, ","); got != tc.tiers {
+			t.Fatalf("%s service_tiers = %s, want %s", tc.slug, got, tc.tiers)
+		}
+		if got := strings.Join(speed, ","); got != tc.speed {
+			t.Fatalf("%s additional_speed_tiers = %s, want %s", tc.slug, got, tc.speed)
+		}
+	}
+	added, _ := codexClientModelEntry(t, "gpt-clone-b")
+	if last := added.Get("service_tiers").Array()[1].Raw; last != `{"id":"turbo","name":"Turbo","description":""}` {
+		t.Fatalf("added tier = %s", last)
 	}
 }

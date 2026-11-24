@@ -8,6 +8,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
@@ -62,10 +63,12 @@ func (h *Handler) PutCodexModelOverrides(c *gin.Context) {
 	home := h.cfg.Home.Enabled
 	h.mu.Unlock()
 
-	// The service reload applies the list too; applying here first makes the
-	// response reflect it even without a reload hook.
-	registry.ApplyCodexModelOverrides(entries, home)
-	h.reloadConfigAfterManagementSave(c.Request.Context(), snapshot)
+	// The service reload applies the list too; applying it inside the
+	// generation-checked reload also covers a missing reload hook, and a stale
+	// concurrent PUT can't restore an older list over a newer one.
+	h.reloadConfigAfterManagementSave(c.Request.Context(), snapshot, func(cfg *config.Config) {
+		registry.ApplyCodexModelOverrides(cfg.Models.CodexOverrides, cfg.Home.Enabled)
+	})
 	writeCodexModelOverrides(c, entries, home)
 }
 
